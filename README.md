@@ -80,12 +80,12 @@ Ready-made configs in [`configs/`](configs/):
 
 `mlxtuner models` prints this for your machine. Estimates use the tier's default settings and are calibrated against measured runs (±30 % for models much larger than the reference):
 
-| RAM | defaults (batch × seq, layers) | comfortable | tight |
+| RAM (as sold) | defaults (batch × seq, layers) | comfortable | tight |
 |---|---|---|---|
 | 8 GB | 1 × 1024, 8 | up to 3B (Qwen2.5-3B, Llama-3.2-3B, Phi-3.5-mini) | — |
-| 16 GB | 1 × 2048, 16 | up to 3B | 7–8B (Qwen2.5-7B, Llama-3.1-8B) |
-| 32 GB | 2 × 2048, 16 | 7–8B | 14B |
-| 64 GB+ | 4 × 2048, 16 | 14B | 32B |
+| 16–18 GB | 1 × 2048, 16 | up to 3B | 7–8B (Qwen2.5-7B, Llama-3.1-8B) |
+| 24–36 GB | 2 × 2048, 16 | 7–8B | 14B |
+| 48 GB+ | 4 × 2048, 16 | 14B | 32B |
 
 Two things that matter more than you'd expect:
 
@@ -103,12 +103,14 @@ The first row decides the converter. All conversational formats become `messages
 | `messages` | `{"messages": [{"role": "user", "content": "…"}, {"role": "assistant", "content": "…"}]}` | canonical; multi-turn ok |
 | `alpaca` | `{"instruction": "…", "input": "…", "output": "…"}` | also `question`/`answer`, `prompt`/`response`, optional `system` |
 | `sharegpt` | `{"conversations": [{"from": "human", "value": "…"}, {"from": "gpt", "value": "…"}]}` | |
-| `prompt_completion` | `{"prompt": "…", "completion": "…"}` | no chat template applied |
+| `prompt_completion` | `{"prompt": "…", "completion": "…"}` | mlx-lm wraps the pair in one user + one assistant turn and applies the chat template, so this also needs an instruct model |
 | `text` | `{"text": "…"}` | plain continued pre-training; `mask_prompt` is ignored |
 
 A directory containing `train.jsonl` (and optionally `valid.jsonl`) in mlx-lm's own layout is used as-is, so existing mlx-lm datasets work unchanged.
 
 `train.mask_prompt: true` (the default) computes loss only on assistant turns / completions, which is what you want for chat tuning.
+
+Rows that don't fit the format the first row established — a line that isn't valid JSON, a turn that isn't a role/content mapping, a completion with no prompt — are dropped and counted, with the reason printed, rather than ending the run.
 
 ## Configuration reference
 
@@ -164,7 +166,7 @@ Values are parsed as numbers, booleans (`true`/`false`/`yes`/`no`) or `null` whe
 | `mlxtuner check` | chip, RAM, tier and the auto defaults |
 | `mlxtuner models [--all]` | curated models with fit verdicts and memory estimates |
 | `mlxtuner init [path]` | commented starter config |
-| `mlxtuner validate` | convert the dataset, show drop reasons, token stats, rendered example |
+| `mlxtuner validate` | convert the dataset, show drop reasons, token stats, rendered example; uses the config's own model for the chat template |
 | `mlxtuner train` | train; `--dry-run` converts data and prints the plan only |
 | `mlxtuner chat <path>` | interactive chat with an adapter dir, fused dir, or Hub id |
 | `mlxtuner eval <path>` | held-out loss / perplexity + sample generations, tuned vs base; data taken from the run's `mlxtuner.yaml` unless `--data` is given, falling back to the split the run kept |

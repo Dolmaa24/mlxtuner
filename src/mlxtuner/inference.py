@@ -130,6 +130,15 @@ def chat_loop(path: str, system: str | None, max_tokens: int, temperature: float
 # ---------------------------------------------------------------------------
 
 
+def gguf_path_for(output: str, gguf: str) -> Path:
+    """Where `mlx_lm fuse --gguf-path` actually writes: inside the save path, unless absolute.
+
+    The Modelfile has to sit next to the file it names, and `--gguf model.gguf` used to put it
+    in the working directory pointing at a file that only exists under ``output``.
+    """
+    return Path(output) / gguf
+
+
 def fuse(adapter_dir: str, output: str, dequantize: bool = False, gguf: str | None = None) -> Path:
     """Merge the adapter into its base model with `mlx_lm fuse`. Returns the output dir."""
     if not is_adapter_dir(adapter_dir):
@@ -149,6 +158,8 @@ def fuse(adapter_dir: str, output: str, dequantize: bool = False, gguf: str | No
     console.print("[dim]$ " + " ".join(cmd) + "[/]", soft_wrap=True)
     subprocess.run(cmd, check=True)
     console.print(f"[green]fused model saved to {output}[/]")
+    if gguf:
+        console.print(f"[green]GGUF written to {gguf_path_for(output, gguf)}[/]")
     return Path(output)
 
 

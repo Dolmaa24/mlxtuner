@@ -1,5 +1,7 @@
 """Regression tests for the 0.2 bug fixes, one test per bug."""
 
+from pathlib import Path
+
 import pytest
 
 from mlxtuner.config import DataConfig, RunConfig
@@ -122,3 +124,30 @@ def test_run_readme_table_survives_a_missing_loss(tmp_path):
     assert all(r.startswith("|") for r in rows), rows
     assert "Final train loss" not in "\n".join(rows)
     assert "| Final val loss | 1.500 |" in rows
+
+
+def test_gguf_modelfile_lands_next_to_the_gguf():
+    """mlx-lm writes the GGUF inside --output; the Modelfile used to go to the cwd."""
+    from mlxtuner.inference import gguf_path_for
+
+    assert gguf_path_for("fused", "model.gguf") == Path("fused/model.gguf")
+    assert gguf_path_for("fused", "/tmp/x.gguf") == Path("/tmp/x.gguf")
+
+
+def test_prompt_completion_counts_as_templated():
+    """mlx-lm's CompletionsDataset applies the chat template, so a template is required."""
+    from mlxtuner.data import TEMPLATED_KINDS
+
+    assert "prompt_completion" in TEMPLATED_KINDS and "messages" in TEMPLATED_KINDS
+    assert "text" not in TEMPLATED_KINDS
+
+
+def test_render_prompt_completion_matches_what_mlx_lm_trains_on():
+    from mlxtuner.data import render
+
+    class FakeTok:
+        def apply_chat_template(self, messages, tokenize=False):
+            return "".join(f"<{m['role']}>{m['content']}" for m in messages)
+
+    rendered = render(FakeTok(), {"prompt": "q", "completion": "a"})
+    assert rendered == "<user>q<assistant>a"  # not the bare concatenation "qa"

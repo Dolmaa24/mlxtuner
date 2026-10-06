@@ -13,7 +13,7 @@ from rich.console import Console
 
 from . import __version__
 from .config import RunConfig
-from .data import DataError, Prepared, prepare
+from .data import TEMPLATED_KINDS, DataError, Prepared, prepare
 from .hardware import Machine, detect, estimate_train_gb, fits
 
 console = Console()
@@ -97,7 +97,7 @@ def run(cfg: RunConfig, dry_run: bool = False, machine: Machine | None = None) -
 
     console.rule("[bold]mlxtuner train")
     console.print(
-        f"[dim]mlxtuner {__version__}[/]  {machine.chip}, {machine.ram_gb:g} GB (tier {machine.tier})"
+        f"[dim]mlxtuner {__version__}[/]  {machine.chip}, {machine.ram_label} (tier {machine.tier})"
     )
 
     # -- data ----------------------------------------------------------------
@@ -136,7 +136,7 @@ def run(cfg: RunConfig, dry_run: bool = False, machine: Machine | None = None) -
         verdict = fits(machine, est)
         colour = {"yes": "green", "tight": "yellow", "no": "red"}[verdict]
         console.print(
-            f"memory: ~{est} GB estimated peak  [{colour}]{verdict}[/] for {machine.ram_gb:g} GB"
+            f"memory: ~{est} GB estimated peak  [{colour}]{verdict}[/] for {machine.ram_label}"
         )
         if verdict == "no":
             console.print(
@@ -156,9 +156,10 @@ def run(cfg: RunConfig, dry_run: bool = False, machine: Machine | None = None) -
 
     console.print(f"[dim]loading {cfg.model} ...[/]")
     model, tokenizer = load(cfg.model, tokenizer_config={"trust_remote_code": True})
-    if data.kind == "messages" and getattr(tokenizer, "chat_template", None) is None:
+    if data.kind in TEMPLATED_KINDS and getattr(tokenizer, "chat_template", None) is None:
         raise SystemExit(
-            f"{cfg.model} has no chat template; use an -Instruct model for conversational data"
+            f"{cfg.model} has no chat template, which mlx-lm needs for {data.kind} data; "
+            "use an -Instruct model, or convert your dataset to the `text` format"
         )
     train_set, valid_set, _ = load_dataset(args, tokenizer)
     if args.num_layers < 0 or args.num_layers > len(model.layers):
