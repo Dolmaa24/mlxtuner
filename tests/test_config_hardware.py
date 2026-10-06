@@ -109,7 +109,10 @@ def test_version_is_single_sourced():
 
     Two literals drift — a release once shipped metadata saying 0.1.1 while the CLI said 0.1.0.
     """
-    import tomllib
+    try:
+        import tomllib  # Python 3.11+
+    except ModuleNotFoundError:  # 3.10 has no tomllib; dev extra provides tomli
+        import tomli as tomllib
 
     raw = tomllib.loads((Path(__file__).resolve().parent.parent / "pyproject.toml").read_text())
     assert "version" in raw["project"].get("dynamic", []), (
