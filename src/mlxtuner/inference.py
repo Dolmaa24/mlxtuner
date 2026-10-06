@@ -43,6 +43,23 @@ def resolve_model_path(model: str, weights: bool = True) -> Path:
     )
 
 
+def model_num_layers(model: str) -> int | None:
+    """Transformer layer count from a model's config.json, or None if it can't be read.
+
+    Only config.json and the tokenizer are fetched, never the weights, so this is cheap enough
+    to call while printing a training plan.
+    """
+    try:
+        cfg = json.loads((resolve_model_path(model, weights=False) / "config.json").read_text())
+    except Exception:  # noqa: BLE001 - offline, private repo, unusual layout: just skip the hint
+        return None
+    for key in ("num_hidden_layers", "n_layers", "num_layers", "n_layer"):
+        v = cfg.get(key)
+        if isinstance(v, int) and v > 0:
+            return v
+    return None
+
+
 def load_tokenizer_only(model: str) -> Any:
     """Fetch just the tokenizer files for a model id / path (no weights)."""
     from mlx_lm.utils import load_tokenizer
@@ -113,6 +130,15 @@ def chat_loop(path: str, system: str | None, max_tokens: int, temperature: float
 # ---------------------------------------------------------------------------
 
 
+def gguf_path_for(output: str, gguf: str) -> Path:
+    """Where `mlx_lm fuse --gguf-path` actually writes: inside the save path, unless absolute.
+
+    The Modelfile has to sit next to the file it names, and `--gguf model.gguf` used to put it
+    in the working directory pointing at a file that only exists under ``output``.
+    """
+    return Path(output) / gguf
+
+
 def fuse(adapter_dir: str, output: str, dequantize: bool = False, gguf: str | None = None) -> Path:
     """Merge the adapter into its base model with `mlx_lm fuse`. Returns the output dir."""
     if not is_adapter_dir(adapter_dir):
@@ -129,9 +155,11 @@ def fuse(adapter_dir: str, output: str, dequantize: bool = False, gguf: str | No
         cmd.append("--dequantize")
     if gguf:
         cmd += ["--export-gguf", "--gguf-path", gguf]
-    console.print("[dim]$ " + " ".join(cmd) + "[/]")
+    console.print("[dim]$ " + " ".join(cmd) + "[/]", soft_wrap=True)
     subprocess.run(cmd, check=True)
     console.print(f"[green]fused model saved to {output}[/]")
+    if gguf:
+        console.print(f"[green]GGUF written to {gguf_path_for(output, gguf)}[/]")
     return Path(output)
 
 
@@ -184,7 +212,7 @@ def to_gguf(
         )
     out = Path(output) if output else src / f"{src.name}-{quant}.gguf"
     cmd = [python, str(converter), str(src), "--outfile", str(out), "--outtype", quant]
-    console.print("[dim]$ " + " ".join(cmd) + "[/]")
+    console.print("[dim]$ " + " ".join(cmd) + "[/]", soft_wrap=True)
     subprocess.run(cmd, check=True)
     console.print(f"[green]GGUF written to {out}[/]")
     return out

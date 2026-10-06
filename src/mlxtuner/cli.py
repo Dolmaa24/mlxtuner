@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -21,6 +21,10 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 console = Console()
+
+# Used by `validate` only when neither a config nor --model names one: small, has a chat
+# template, and only its tokenizer is downloaded.
+TOKENIZER_STAND_IN = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
 SetOpt = Annotated[
     list[str] | None,
@@ -77,7 +81,7 @@ def check() -> None:
     m = detect()
     console.print(f"mlxtuner {__version__}")
     console.print(f"chip: {m.chip}")
-    console.print(f"ram:  {m.ram_gb:g} GB  -> tier {m.tier}")
+    console.print(f"ram:  {m.ram_label}  ({m.ram_gb:g} GB decimal)  -> tier {m.tier}")
     if not m.apple_silicon:
         console.print("[red]This is not an Apple Silicon Mac; MLX will not run here.[/]")
         raise typer.Exit(1)
@@ -101,7 +105,7 @@ def models(
     m = detect()
     d = TIER_DEFAULTS[m.tier]
     table = Table(
-        title=f"LoRA training on {m.chip}, {m.ram_gb:g} GB\n"
+        title=f"LoRA training on {m.chip}, {m.ram_label}\n"
         f"(batch {d.batch_size}, seq {d.max_seq_length}, {d.num_layers} layers, grad checkpoint {'on' if d.grad_checkpoint else 'off'})",
         caption="all repos are under mlx-community/",
     )
@@ -167,11 +171,16 @@ def validate(
     """Convert a dataset without training: format detection, drop reasons, token-length stats."""
     import tempfile
 
-    from .data import DataError, prepare, render, token_stats
+    from .data import TEMPLATED_KINDS, DataError, prepare, render, token_stats
     from .hardware import detect
 
-    model = model or "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+    # Only fall back to a stand-in tokenizer when nothing names a model. Defaulting
+    # unconditionally turned it into an override, so a Llama config was validated against
+    # Qwen's chat template and token counts, and a model with no template went unnoticed.
+    if config is None and model is None:
+        model = TOKENIZER_STAND_IN
     cfg = _load_config(config, model, data, None, overrides).resolved(detect())
+    console.print(f"[dim]tokenizer: {cfg.model}[/]")
     with tempfile.TemporaryDirectory() as tmp:
         try:
             p = prepare(cfg.data, Path(tmp) / "data")
@@ -186,8 +195,11 @@ def validate(
         from .inference import load_tokenizer_only
 
         tok = load_tokenizer_only(cfg.model)
-        if p.kind == "messages" and getattr(tok, "chat_template", None) is None:
-            console.print(f"[red]{cfg.model} has no chat template; use an -Instruct model[/]")
+        if p.kind in TEMPLATED_KINDS and getattr(tok, "chat_template", None) is None:
+            console.print(
+                f"[red]{cfg.model} has no chat template, which mlx-lm needs for {p.kind} data; "
+                "use an -Instruct model, or convert your dataset to the `text` format[/]"
+            )
             raise typer.Exit(1)
         with open(p.dir / "train.jsonl") as f:
             rows = [json.loads(line) for line in f]
@@ -268,17 +280,18 @@ def fuse(
 ) -> None:
     """Merge the adapter into the base model -> standalone MLX model (and optionally GGUF / Ollama)."""
     from .inference import fuse as _fuse
-    from .inference import write_ollama_modelfile
+    from .inference import gguf_path_for, write_ollama_modelfile
 
     if gguf and not dequantize:
         console.print("[dim]--gguf implies --dequantize[/]")
         dequantize = True
+    if ollama and not gguf:
+        console.print("[red]--ollama needs --gguf <path>[/]")
+        raise typer.Exit(1)
     _fuse(adapter, output, dequantize=dequantize, gguf=gguf)
     if ollama:
-        if not gguf:
-            console.print("[red]--ollama needs --gguf <path>[/]")
-            raise typer.Exit(1)
-        write_ollama_modelfile(gguf, system=system)
+        # mlx-lm writes the GGUF inside --output, so the Modelfile belongs there, not in the cwd.
+        write_ollama_modelfile(str(gguf_path_for(output, gguf)), system=system)
 
 
 @app.command()
@@ -312,6 +325,7 @@ def eval(  # noqa: A001 - typer command name
     from .data import DataError
     from .eval import print_result, run_eval, save_result
     from .hardware import detect
+    from .train import DATA_SUBDIR
 
     run_yaml = Path(path) / "mlxtuner.yaml"
     if config is None and data is None and run_yaml.exists():
@@ -323,8 +337,9 @@ def eval(  # noqa: A001 - typer command name
     cfg = _load_config(
         config, "unused" if config is None else None, data, None, overrides
     ).resolved(detect())
-    try:
-        result = run_eval(
+
+    def _eval() -> Any:
+        return run_eval(
             path,
             cfg.data,
             max_seq_length=int(cfg.train.max_seq_length),
@@ -334,9 +349,31 @@ def eval(  # noqa: A001 - typer command name
             max_examples=max_examples,
             max_tokens=max_tokens,
         )
+
+    try:
+        result = _eval()
     except DataError as e:
-        console.print(f"[red]data error:[/] {e}")
-        raise typer.Exit(1) from None
+        # The dataset the run trained on may have moved since. The run kept its own converted
+        # copy of the split, so score that rather than giving up.
+        # "data" is where runs made before 0.2 kept their split.
+        kept = next(
+            (
+                d
+                for n in (DATA_SUBDIR, "data")
+                if (d := Path(path) / n).joinpath("train.jsonl").exists()
+            ),
+            None,
+        )
+        if data is not None or kept is None:
+            console.print(f"[red]data error:[/] {e}")
+            raise typer.Exit(1) from None
+        console.print(f"[yellow]{cfg.data.path} is gone[/]; using the split kept in {kept}")
+        cfg.data.path = str(kept)
+        try:
+            result = _eval()
+        except DataError as e2:
+            console.print(f"[red]data error:[/] {e2}")
+            raise typer.Exit(1) from None
     print_result(result)
     out = output or (Path(path) / "eval.json" if Path(path).is_dir() else Path("eval.json"))
     save_result(result, out)

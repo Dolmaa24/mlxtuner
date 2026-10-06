@@ -41,11 +41,22 @@ _OUTPUT_KEYS = ("output", "response", "answer", "completion")
 # ---------------------------------------------------------------------------
 
 
-def _read_file(p: Path) -> list[dict[str, Any]]:
+def _read_file(p: Path, reasons: Counter[str] | None = None) -> list[dict[str, Any]]:
+    """Rows from one file. Unparseable .jsonl lines are counted, not fatal."""
     ext = p.suffix.lower()
     if ext == ".jsonl":
+        rows = []
         with open(p) as f:
-            return [json.loads(line) for line in f if line.strip()]
+            for n, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    if reasons is None:
+                        raise DataError(f"{p}:{n}: not valid JSON ({e.msg})") from None
+                    reasons[f"unparseable JSON line (first: {p.name}:{n}, {e.msg})"] += 1
+        return rows
     if ext == ".json":
         with open(p) as f:
             data = json.load(f)
@@ -64,22 +75,28 @@ def _read_file(p: Path) -> list[dict[str, Any]]:
     raise DataError(f"Unsupported file type {ext!r}; use .jsonl, .json, .csv or .txt")
 
 
-def load_rows(path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-    """Return (train_rows, valid_rows_or_None) from a file, an mlx-lm style directory, or a Hub id."""
+def load_rows(
+    path: str, reasons: Counter[str] | None = None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+    """Return (train_rows, valid_rows_or_None) from a file, an mlx-lm style directory, or a Hub id.
+
+    Pass ``reasons`` to have unreadable rows counted there instead of raising.
+    """
     p = Path(os.path.expanduser(path))
     if p.is_file():
-        return _read_file(p), None
+        return _read_file(p, reasons), None
     if p.is_dir():
         train_f = p / "train.jsonl"
         if train_f.exists():
             valid_f = p / "valid.jsonl"
-            return _read_file(train_f), (_read_file(valid_f) if valid_f.exists() else None)
+            valid = _read_file(valid_f, reasons) if valid_f.exists() else None
+            return _read_file(train_f, reasons), valid
         files = sorted(f for f in p.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS)
         if not files:
             raise DataError(f"No data files in {p}")
         rows: list[dict[str, Any]] = []
         for f in files:
-            rows.extend(_read_file(f))
+            rows.extend(_read_file(f, reasons))
         return rows, None
     if p.suffix.lower() in SUPPORTED_EXTENSIONS:
         # It names a data file, so it was meant to be local: don't send the user after a Hub extra.
@@ -158,10 +175,27 @@ def _flatten(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _require_list(row: dict[str, Any], key: str, fmt: str) -> list[Any]:
+    """The column this format needs, or a drop reason naming what the row looks like instead.
+
+    Datasets that mix formats row by row used to raise KeyError out of prepare(), killing a run
+    over one odd line rather than dropping it.
+    """
+    v = row.get(key)
+    if not isinstance(v, list):
+        raise DataError(
+            f"row has no {key!r} list, so it is not {fmt} like the first row "
+            f"(columns: {', '.join(sorted(row)[:6]) or 'none'})"
+        )
+    return v
+
+
 def to_messages(row: dict[str, Any], fmt: str, system_prompt: str | None) -> list[dict[str, str]]:
     msgs: list[dict[str, str]] = []
     if fmt == "messages":
-        for m in row["messages"]:
+        for m in _require_list(row, "messages", fmt):
+            if not isinstance(m, dict):
+                raise DataError(f"message is {type(m).__name__}, expected a role/content mapping")
             role = _SHAREGPT_ROLES.get(
                 str(m.get("role", "")).lower(), str(m.get("role", "")).lower()
             )
@@ -172,7 +206,9 @@ def to_messages(row: dict[str, Any], fmt: str, system_prompt: str | None) -> lis
         system = _first(row, ("system", "system_prompt"))
         if system:
             msgs.append({"role": "system", "content": system})
-        for t in row["conversations"]:
+        for t in _require_list(row, "conversations", fmt):
+            if not isinstance(t, dict):
+                raise DataError(f"turn is {type(t).__name__}, expected a from/value mapping")
             raw = str(t.get("from", t.get("role", ""))).lower()
             role = _SHAREGPT_ROLES.get(raw)
             if role is None:
@@ -206,6 +242,8 @@ def to_messages(row: dict[str, Any], fmt: str, system_prompt: str | None) -> lis
 
 def convert_row(row: dict[str, Any], fmt: str, cfg: DataConfig) -> dict[str, Any]:
     """One row in any supported format -> one mlx-lm row."""
+    if not isinstance(row, dict):
+        raise DataError(f"row is {type(row).__name__}, expected an object")
     if fmt == "text":
         text = row.get(cfg.text_field)
         if not isinstance(text, str) or not text.strip():
@@ -213,11 +251,13 @@ def convert_row(row: dict[str, Any], fmt: str, cfg: DataConfig) -> dict[str, Any
         return {"text": text}
     if fmt == "prompt_completion":
         prompt, completion = row.get(cfg.prompt_field), row.get(cfg.completion_field)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise DataError(f"empty {cfg.prompt_field}")  # else it trained on the string "None"
         if not isinstance(completion, str) or not completion.strip():
-            raise DataError("empty completion")
+            raise DataError(f"empty {cfg.completion_field}")
         if cfg.system_prompt:
             prompt = f"{cfg.system_prompt}\n\n{prompt}"
-        return {"prompt": str(prompt), "completion": completion}
+        return {"prompt": prompt, "completion": completion}
     return {"messages": to_messages(row, fmt, cfg.system_prompt)}
 
 
@@ -233,15 +273,37 @@ class Prepared:
     sample: dict[str, Any] | None = None
 
 
+# The only files prepare() writes, and so the only ones it may delete on a re-run.
+_OUR_FILES = {"train.jsonl", "valid.jsonl"}
+
+
+def _clear_work_dir(work_dir: Path) -> None:
+    """Empty the conversion directory, but never delete a directory we did not write."""
+    if not work_dir.exists():
+        return
+    if not work_dir.is_dir():
+        raise DataError(f"{work_dir} exists and is not a directory")
+    stray = sorted(p.name for p in work_dir.iterdir() if p.name not in _OUR_FILES)
+    if stray:
+        raise DataError(
+            f"Refusing to overwrite {work_dir}: it holds files mlxtuner did not write "
+            f"({', '.join(stray[:4])}{', ...' if len(stray) > 4 else ''}). "
+            "Point train.output at a directory of its own."
+        )
+    shutil.rmtree(work_dir)
+
+
 def prepare(cfg: DataConfig, work_dir: Path) -> Prepared:
     """Load, convert, split and write mlx-lm's train/valid.jsonl into ``work_dir``."""
-    train_rows, valid_rows = load_rows(cfg.path)
+    reasons: Counter[str] = Counter()
+    train_rows, valid_rows = load_rows(cfg.path, reasons)
     if not train_rows:
-        raise DataError("Dataset is empty")
+        raise DataError(
+            "Dataset is empty"
+            + (f" ({sum(reasons.values())} unparseable line(s))" if reasons else "")
+        )
     fmt = detect_format(train_rows[0], cfg) if cfg.format == "auto" else cfg.format
     kind = {"text": "text", "prompt_completion": "prompt_completion"}.get(fmt, "messages")
-
-    reasons: Counter[str] = Counter()
 
     def convert_all(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out = []
@@ -269,8 +331,7 @@ def prepare(cfg: DataConfig, work_dir: Path) -> Prepared:
     else:
         valid = []
 
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
+    _clear_work_dir(work_dir)
     work_dir.mkdir(parents=True)
     # mlx-lm treats a present-but-empty valid.jsonl as an error, so only write it when non-empty.
     for name, rows in (("train", train), ("valid", valid)):
@@ -292,12 +353,24 @@ def prepare(cfg: DataConfig, work_dir: Path) -> Prepared:
     )
 
 
+# Formats mlx-lm runs through the model's chat template, and so cannot train without one.
+TEMPLATED_KINDS = {"messages", "prompt_completion"}
+
+
 def render(tokenizer: Any, row: dict[str, Any]) -> str:
     """The string the model actually trains on for one converted row."""
     if "messages" in row:
         return tokenizer.apply_chat_template(row["messages"], tokenize=False)
     if "prompt" in row:
-        return row["prompt"] + row["completion"]
+        # Not a bare concatenation: mlx-lm's CompletionsDataset wraps the pair in one user and
+        # one assistant turn and applies the chat template, exactly as for `messages`.
+        return tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": row["prompt"]},
+                {"role": "assistant", "content": row["completion"]},
+            ],
+            tokenize=False,
+        )
     return row["text"]
 
 

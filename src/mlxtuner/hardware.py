@@ -14,15 +14,27 @@ class Machine:
     apple_silicon: bool
 
     @property
+    def ram_label(self) -> str:
+        """RAM the way the Mac is sold: 8 GiB of memory is "8 GB" on the spec sheet."""
+        return f"{self.ram_gb * 1e9 / 1024**3:.0f} GB"
+
+    @property
     def tier(self) -> str:
-        """Coarse RAM bucket used for defaults: 8 | 16 | 32 | 64+."""
-        if self.ram_gb <= 9:
+        """Coarse RAM bucket used for defaults: 8 | 16 | 32 | 64+.
+
+        The cut-offs are in decimal GB, because that is what psutil reports and what
+        ``mx.get_peak_memory() / 1e9`` measures, while Macs are sold in GiB: an "8 GB" Mac has
+        8.59 GB, a "36 GB" one has 38.65. Thresholds written as if they were GiB put the 18 GB
+        M3 Pro and the 36/48 GB M3 Max a tier too high — the 36 GB machine was handed the
+        64 GB+ defaults (batch 4 x 2048), which need ~40 GB for the 14B it was then offered.
+        """
+        if self.ram_gb <= 13:  # 8 GiB = 8.59
             return "8"
-        if self.ram_gb <= 18:
+        if self.ram_gb <= 21:  # 16 GiB = 17.18, 18 GiB = 19.33
             return "16"
-        if self.ram_gb <= 36:
+        if self.ram_gb <= 42:  # 24 = 25.77, 32 = 34.36, 36 = 38.65
             return "32"
-        return "64+"
+        return "64+"  # 48 GiB = 51.54 and up
 
 
 def _sysctl(key: str) -> str | None:
@@ -145,7 +157,15 @@ def estimate_train_gb(
     Three terms: resident 4-bit weights; a logits term proportional to tokens × vocab (this
     dominates for small models with big vocabularies); and per-layer activations for the
     layers that receive gradients, scaled by hidden size (≈ sqrt of the weight size).
+
+    ``num_layers`` must already be a real layer count. mlx-lm's ``-1`` ("every layer") would
+    otherwise subtract memory and turn a run that cannot fit into a confident "yes".
     """
+    if num_layers < 1:
+        raise ValueError(
+            f"num_layers must be a real layer count, got {num_layers}. "
+            "Resolve -1 ('all layers') against the model before estimating."
+        )
     ktok = batch_size * max_seq_length / 1000
     logits = ktok * vocab_k * _LOGITS_GB_PER_KTOK_PER_KVOCAB
     hidden_scale = (weights_gb / _REF_WEIGHTS_GB) ** 0.5

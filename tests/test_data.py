@@ -138,3 +138,64 @@ def test_prepare_drops_bad_rows(tmp_path):
 def test_missing_local_file_says_so_not_a_hub_error():
     with pytest.raises(DataError, match="No such file"):
         load_rows("data/train.jsonl")
+
+
+# --- bad rows are dropped and counted, never fatal ----------------------------
+
+
+def test_malformed_jsonl_line_is_dropped_not_fatal(tmp_path):
+    src = tmp_path / "d.jsonl"
+    src.write_text('{"text": "ok"}\n{"text": "oops"\n{"text": "ok2"}\n')
+    p = prepare(DataConfig(path=str(src), eval_fraction=0), tmp_path / "w")
+    assert p.n_train == 2 and p.dropped == 1
+    assert "unparseable JSON" in next(iter(p.drop_reasons))
+
+
+def test_all_lines_malformed_is_a_clear_error(tmp_path):
+    src = tmp_path / "d.jsonl"
+    src.write_text('{"text": "oops"\n{"nope"\n')
+    with pytest.raises(DataError, match="unparseable"):
+        prepare(DataConfig(path=str(src)), tmp_path / "w")
+
+
+def test_load_rows_still_raises_on_bad_json_without_a_counter(tmp_path):
+    src = tmp_path / "d.jsonl"
+    src.write_text('{"text": "oops"\n')
+    with pytest.raises(DataError, match="not valid JSON"):
+        load_rows(str(src))
+
+
+def test_row_in_another_format_is_dropped_not_a_keyerror(tmp_path):
+    src = tmp_path / "d.jsonl"
+    _write_jsonl(
+        src,
+        [
+            {"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]},
+            {"instruction": "q2", "output": "a2"},
+        ],
+    )
+    p = prepare(DataConfig(path=str(src), eval_fraction=0), tmp_path / "w")
+    assert p.n_train == 1 and p.dropped == 1
+    assert "not messages like the first row" in next(iter(p.drop_reasons))
+
+
+def test_turn_that_is_not_a_mapping_is_dropped(tmp_path):
+    src = tmp_path / "d.jsonl"
+    _write_jsonl(
+        src,
+        [
+            {"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]},
+            {"messages": ["just a string"]},
+        ],
+    )
+    p = prepare(DataConfig(path=str(src), eval_fraction=0), tmp_path / "w")
+    assert p.n_train == 1 and p.dropped == 1
+
+
+def test_prompt_completion_row_without_a_prompt_is_dropped(tmp_path):
+    """It used to train on the literal string "None"."""
+    src = tmp_path / "d.jsonl"
+    _write_jsonl(src, [{"prompt": "a", "completion": "b"}, {"prompt": None, "completion": "c"}])
+    p = prepare(DataConfig(path=str(src), eval_fraction=0), tmp_path / "w")
+    assert p.n_train == 1 and p.dropped == 1
+    assert "None" not in (p.dir / "train.jsonl").read_text()

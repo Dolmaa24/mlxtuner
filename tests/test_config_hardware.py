@@ -27,6 +27,36 @@ def test_overrides():
         apply_overrides({}, ["nope"])
 
 
+def test_overrides_reach_a_data_shorthand_config():
+    """`--data x` and `--set data.path=x` hit a string, not a mapping, before 0.2."""
+    cfg = RunConfig.from_dict({"model": "m", "data": "old.jsonl"}, ["data.path=new.jsonl"])
+    assert cfg.data.path == "new.jsonl"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("0123", 123),  # YAML 1.1 read this as octal 83
+        ("yes", True),
+        ("no", False),
+        ("null", None),
+        ("1e-4", 1e-4),
+        ("-1", -1),
+        ("runs/2024-05-05", "runs/2024-05-05"),
+        ("a=b", "a=b"),
+        ("'0123'", "0123"),  # quote to force a string
+    ],
+)
+def test_override_scalars_are_predictable(value, expected):
+    assert apply_overrides({}, [f"k={value}"])["k"] == expected
+
+
+def test_estimator_rejects_the_all_layers_sentinel():
+    """-1 meant 'every layer' to mlx-lm but *subtracted* memory here, turning 'no' into 'yes'."""
+    with pytest.raises(ValueError, match="real layer count"):
+        estimate_train_gb(4.28, 1, 2048, -1, True, 152)
+
+
 def test_invalid_config_is_loud():
     with pytest.raises(ValidationError):
         RunConfig.from_dict({"model": "m", "data": "d", "lora": {"type": "qlora"}})
@@ -122,3 +152,43 @@ def test_version_is_single_sourced():
         "pyproject has a static version; it would drift from __version__"
     )
     assert raw["tool"]["hatch"]["version"]["path"] == "src/mlxtuner/__init__.py"
+
+
+@pytest.mark.parametrize(
+    "sold_as_gib,tier",
+    [
+        (8, "8"),
+        (16, "16"),
+        (18, "16"),
+        (24, "32"),
+        (32, "32"),
+        (36, "32"),
+        (48, "64+"),
+        (64, "64+"),
+    ],
+)
+def test_tiers_use_the_ram_macs_are_sold_with(sold_as_gib, tier):
+    """psutil reports decimal GB; Macs ship in GiB. Thresholds written as GiB put the 18 GB
+    M3 Pro and the 36 GB M3 Max a tier too high — 36 GB got the 64 GB+ batch-4 defaults."""
+    m = Machine(chip="x", ram_gb=round(sold_as_gib * 1024**3 / 1e9, 1), apple_silicon=True)
+    assert m.tier == tier
+    assert m.ram_label == f"{sold_as_gib} GB"
+
+
+@pytest.mark.parametrize(
+    "sold_as_gib,repo",
+    [
+        (8, "mlx-community/Qwen2.5-1.5B-Instruct-4bit"),
+        (18, "mlx-community/Qwen2.5-7B-Instruct-4bit"),
+        (36, "mlx-community/Qwen2.5-14B-Instruct-4bit"),
+        (48, "mlx-community/Qwen2.5-14B-Instruct-4bit"),
+    ],
+)
+def test_tier_defaults_fit_the_machines_that_get_them(sold_as_gib, repo):
+    rec = {m.repo: m for m in MODELS}[repo]
+    m = Machine(chip="x", ram_gb=round(sold_as_gib * 1024**3 / 1e9, 1), apple_silicon=True)
+    d = TIER_DEFAULTS[m.tier]
+    est = estimate_train_gb(
+        rec.weights_gb, d.batch_size, d.max_seq_length, d.num_layers, d.grad_checkpoint, rec.vocab_k
+    )
+    assert fits(m, est) in {"yes", "tight"}, (sold_as_gib, repo, est)
