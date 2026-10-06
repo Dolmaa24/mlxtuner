@@ -342,8 +342,16 @@ def eval(  # noqa: A001 - typer command name
     except DataError as e:
         # The dataset the run trained on may have moved since. The run kept its own converted
         # copy of the split, so score that rather than giving up.
-        kept = Path(path) / DATA_SUBDIR
-        if data is not None or not (kept / "train.jsonl").exists():
+        # "data" is where runs made before 0.2 kept their split.
+        kept = next(
+            (
+                d
+                for n in (DATA_SUBDIR, "data")
+                if (d := Path(path) / n).joinpath("train.jsonl").exists()
+            ),
+            None,
+        )
+        if data is not None or kept is None:
             console.print(f"[red]data error:[/] {e}")
             raise typer.Exit(1) from None
         console.print(f"[yellow]{cfg.data.path} is gone[/]; using the split kept in {kept}")
