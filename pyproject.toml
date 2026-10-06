@@ -32,7 +32,7 @@ dependencies = [
 # Load datasets straight from the Hugging Face Hub by id.
 hub = ["datasets>=2.20"]
 # Extras llama.cpp's convert_hf_to_gguf.py needs beyond what mlx-lm already pulls in.
-gguf = ["torch>=2.1", "sentencepiece>=0.1.98,<0.3", "protobuf>=4.21,<5"]
+gguf = ["torch>=2.1", "sentencepiece>=0.1.98,<0.3", "protobuf>=4.21,<8"]
 dev = ["pytest>=8", "ruff>=0.6", "tomli>=2; python_version<'3.11'"]
 
 [project.scripts]
