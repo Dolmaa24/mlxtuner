@@ -43,6 +43,23 @@ def resolve_model_path(model: str, weights: bool = True) -> Path:
     )
 
 
+def model_num_layers(model: str) -> int | None:
+    """Transformer layer count from a model's config.json, or None if it can't be read.
+
+    Only config.json and the tokenizer are fetched, never the weights, so this is cheap enough
+    to call while printing a training plan.
+    """
+    try:
+        cfg = json.loads((resolve_model_path(model, weights=False) / "config.json").read_text())
+    except Exception:  # noqa: BLE001 - offline, private repo, unusual layout: just skip the hint
+        return None
+    for key in ("num_hidden_layers", "n_layers", "num_layers", "n_layer"):
+        v = cfg.get(key)
+        if isinstance(v, int) and v > 0:
+            return v
+    return None
+
+
 def load_tokenizer_only(model: str) -> Any:
     """Fetch just the tokenizer files for a model id / path (no weights)."""
     from mlx_lm.utils import load_tokenizer
@@ -129,7 +146,7 @@ def fuse(adapter_dir: str, output: str, dequantize: bool = False, gguf: str | No
         cmd.append("--dequantize")
     if gguf:
         cmd += ["--export-gguf", "--gguf-path", gguf]
-    console.print("[dim]$ " + " ".join(cmd) + "[/]")
+    console.print("[dim]$ " + " ".join(cmd) + "[/]", soft_wrap=True)
     subprocess.run(cmd, check=True)
     console.print(f"[green]fused model saved to {output}[/]")
     return Path(output)
@@ -184,7 +201,7 @@ def to_gguf(
         )
     out = Path(output) if output else src / f"{src.name}-{quant}.gguf"
     cmd = [python, str(converter), str(src), "--outfile", str(out), "--outtype", quant]
-    console.print("[dim]$ " + " ".join(cmd) + "[/]")
+    console.print("[dim]$ " + " ".join(cmd) + "[/]", soft_wrap=True)
     subprocess.run(cmd, check=True)
     console.print(f"[green]GGUF written to {out}[/]")
     return out

@@ -145,7 +145,15 @@ def estimate_train_gb(
     Three terms: resident 4-bit weights; a logits term proportional to tokens × vocab (this
     dominates for small models with big vocabularies); and per-layer activations for the
     layers that receive gradients, scaled by hidden size (≈ sqrt of the weight size).
+
+    ``num_layers`` must already be a real layer count. mlx-lm's ``-1`` ("every layer") would
+    otherwise subtract memory and turn a run that cannot fit into a confident "yes".
     """
+    if num_layers < 1:
+        raise ValueError(
+            f"num_layers must be a real layer count, got {num_layers}. "
+            "Resolve -1 ('all layers') against the model before estimating."
+        )
     ktok = batch_size * max_seq_length / 1000
     logits = ktok * vocab_k * _LOGITS_GB_PER_KTOK_PER_KVOCAB
     hidden_scale = (weights_gb / _REF_WEIGHTS_GB) ** 0.5

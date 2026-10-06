@@ -63,6 +63,9 @@ class TrainConfig(BaseModel):
     steps_per_eval: int | None = Field(None, description="null = 4 evals per run")
     val_batches: int = Field(25, description="Validation batches per eval; -1 = whole set")
     save_every: int | None = Field(None, description="null = every eval")
+    keep_checkpoints: int = Field(
+        1, ge=-1, description="Numbered checkpoints to keep at the end; 0 = none, -1 = all"
+    )
     seed: int = 0
     resume: str | None = Field(None, description="Path to adapters.safetensors to continue from")
 
@@ -88,6 +91,10 @@ class RunConfig(BaseModel):
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any], overrides: list[str] | None = None) -> RunConfig:
+        if isinstance(raw.get("data"), str):
+            # Expand the `data: train.jsonl` shorthand first, or `--set data.path=...` (and the
+            # --data shortcut built on it) would hit a string where it needs a mapping.
+            raw = {**raw, "data": {"path": raw["data"]}}
         if overrides:
             raw = apply_overrides(raw, overrides)
         return cls.model_validate(raw)
@@ -113,11 +120,36 @@ class RunConfig(BaseModel):
         return out
 
 
+_BOOLS = {"true": True, "false": False, "yes": True, "no": False, "on": True, "off": False}
+
+
 def _parse_scalar(value: str) -> Any:
+    """Parse a ``--set`` value without YAML 1.1's surprises (``0123`` is 123, not octal 83).
+
+    Wrap a value in quotes to keep it a string: ``--set data.path="'0123'"``.
+    """
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    low = v.lower()
+    if low in {"", "null", "none", "~"}:
+        return None
+    if low in _BOOLS:
+        return _BOOLS[low]
     try:
-        return yaml.safe_load(value)
-    except yaml.YAMLError:
-        return value
+        return int(v, 10)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    if v[0] in "[{":  # inline lists / mappings, e.g. --set train.lr_schedule={...}
+        try:
+            return yaml.safe_load(v)
+        except yaml.YAMLError:
+            return v
+    return v
 
 
 def apply_overrides(raw: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
@@ -163,4 +195,5 @@ train:
   grad_checkpoint: auto
   lr: 1.0e-5
   mask_prompt: true             # learn only from assistant turns
+  keep_checkpoints: 1           # numbered checkpoints kept at the end (0 = none, -1 = all)
 """

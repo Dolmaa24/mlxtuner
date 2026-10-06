@@ -22,7 +22,7 @@ mlx-lm already ships a capable LoRA trainer. What it doesn't do is tell you *wha
 - **One path to a usable model** — `train` → `eval` → `chat` → `fuse` → `export` (GGUF for any llama.cpp-supported architecture, plus an Ollama Modelfile).
 - **`mlxtuner eval`** answers "did it help?" — the same validation loss mlx-lm trains against, tuned vs base, with sample generations side by side.
 - **Reproducible** — every run directory gets the resolved config, metrics with peak memory and throughput, and a README.
-  It also holds `data/train.jsonl` and `data/valid.jsonl`, the exact converted split the run used — handy for `resume`, but it means **sharing or uploading an adapter directory shares your training data**. Delete `data/` first if that matters.
+  It also holds `.mlxtuner-data/train.jsonl` and `.mlxtuner-data/valid.jsonl`, the exact converted split the run used — `mlxtuner eval` falls back to it if the original dataset has moved, but it means **sharing or uploading an adapter directory shares your training data**. Delete `.mlxtuner-data/` first if that matters.
 
 Measured on an M2 with 8 GB: Qwen2.5-0.5B-4bit trains at ~12 it/s with 0.5 GB peak on short examples; Qwen2.5-1.5B-4bit on 300 rows of `yahma/alpaca-cleaned` (up to 645 tokens) ran at 1.8 it/s with **2.1 GB peak**, val loss 1.31 → 1.08, held-out perplexity 3.70 → 2.93 vs base. 3B fits with the same settings.
 
@@ -90,7 +90,7 @@ Ready-made configs in [`configs/`](configs/):
 Two things that matter more than you'd expect:
 
 1. **Vocabulary size.** The logits and their gradient cost ~1.2 GB per 1 000 tokens per step for a 150k-vocab model (Qwen), ~1.0 GB for Llama 3, ~0.25 GB for Phi. This is why a 0.5B model still peaks at 2 GB with 1k-token examples, and why `max_seq_length × batch_size` is the first knob to turn.
-2. **`num_layers`.** Only the top N transformer layers get adapters and gradients. 8 is plenty for style/format tuning; 16 for more; `-1` for all.
+2. **`num_layers`.** Only the top N transformer layers get adapters and gradients. 8 is plenty for style/format tuning; 16 for more; `-1` for all (the plan line then prints the real count, e.g. `layers=all(24)`).
 
 If a run prints a peak memory well under your RAM, raise `batch_size` (faster) or `max_seq_length` (longer examples). If it swaps or crashes, lower them.
 
@@ -149,11 +149,13 @@ train:
   steps_per_eval: null          # null = 4 evals per run
   val_batches: 25
   save_every: null              # null = every eval
+  keep_checkpoints: 1           # numbered checkpoints kept at the end; 0 = none, -1 = all
   seed: 0
   resume: null                  # path to adapters.safetensors
 ```
 
 Everything is overridable with `--set section.key=value`; `--model`, `--data`, `--output` are shortcuts.
+Values are parsed as numbers, booleans (`true`/`false`/`yes`/`no`) or `null` where they look like one; quote to force a string: `--set data.path="'0123'"`.
 
 ## Commands
 
@@ -165,7 +167,7 @@ Everything is overridable with `--set section.key=value`; `--model`, `--data`, `
 | `mlxtuner validate` | convert the dataset, show drop reasons, token stats, rendered example |
 | `mlxtuner train` | train; `--dry-run` converts data and prints the plan only |
 | `mlxtuner chat <path>` | interactive chat with an adapter dir, fused dir, or Hub id |
-| `mlxtuner eval <path>` | held-out loss / perplexity + sample generations, tuned vs base; data taken from the run's `mlxtuner.yaml` unless `--data` is given |
+| `mlxtuner eval <path>` | held-out loss / perplexity + sample generations, tuned vs base; data taken from the run's `mlxtuner.yaml` unless `--data` is given, falling back to the split the run kept |
 | `mlxtuner fuse <adapter>` | merge into a standalone model; `--dequantize` for export; `--gguf out.gguf` for llama-family |
 | `mlxtuner export <fused>` | GGUF via llama.cpp's converter (any architecture it supports) + `--ollama` Modelfile |
 | `mlxtuner info <run dir>` | metrics from a finished run |

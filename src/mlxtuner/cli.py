@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -312,6 +312,7 @@ def eval(  # noqa: A001 - typer command name
     from .data import DataError
     from .eval import print_result, run_eval, save_result
     from .hardware import detect
+    from .train import DATA_SUBDIR
 
     run_yaml = Path(path) / "mlxtuner.yaml"
     if config is None and data is None and run_yaml.exists():
@@ -323,8 +324,9 @@ def eval(  # noqa: A001 - typer command name
     cfg = _load_config(
         config, "unused" if config is None else None, data, None, overrides
     ).resolved(detect())
-    try:
-        result = run_eval(
+
+    def _eval() -> Any:
+        return run_eval(
             path,
             cfg.data,
             max_seq_length=int(cfg.train.max_seq_length),
@@ -334,9 +336,23 @@ def eval(  # noqa: A001 - typer command name
             max_examples=max_examples,
             max_tokens=max_tokens,
         )
+
+    try:
+        result = _eval()
     except DataError as e:
-        console.print(f"[red]data error:[/] {e}")
-        raise typer.Exit(1) from None
+        # The dataset the run trained on may have moved since. The run kept its own converted
+        # copy of the split, so score that rather than giving up.
+        kept = Path(path) / DATA_SUBDIR
+        if data is not None or not (kept / "train.jsonl").exists():
+            console.print(f"[red]data error:[/] {e}")
+            raise typer.Exit(1) from None
+        console.print(f"[yellow]{cfg.data.path} is gone[/]; using the split kept in {kept}")
+        cfg.data.path = str(kept)
+        try:
+            result = _eval()
+        except DataError as e2:
+            console.print(f"[red]data error:[/] {e2}")
+            raise typer.Exit(1) from None
     print_result(result)
     out = output or (Path(path) / "eval.json" if Path(path).is_dir() else Path("eval.json"))
     save_result(result, out)

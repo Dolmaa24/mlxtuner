@@ -27,6 +27,36 @@ def test_overrides():
         apply_overrides({}, ["nope"])
 
 
+def test_overrides_reach_a_data_shorthand_config():
+    """`--data x` and `--set data.path=x` hit a string, not a mapping, before 0.2."""
+    cfg = RunConfig.from_dict({"model": "m", "data": "old.jsonl"}, ["data.path=new.jsonl"])
+    assert cfg.data.path == "new.jsonl"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("0123", 123),  # YAML 1.1 read this as octal 83
+        ("yes", True),
+        ("no", False),
+        ("null", None),
+        ("1e-4", 1e-4),
+        ("-1", -1),
+        ("runs/2024-05-05", "runs/2024-05-05"),
+        ("a=b", "a=b"),
+        ("'0123'", "0123"),  # quote to force a string
+    ],
+)
+def test_override_scalars_are_predictable(value, expected):
+    assert apply_overrides({}, [f"k={value}"])["k"] == expected
+
+
+def test_estimator_rejects_the_all_layers_sentinel():
+    """-1 meant 'every layer' to mlx-lm but *subtracted* memory here, turning 'no' into 'yes'."""
+    with pytest.raises(ValueError, match="real layer count"):
+        estimate_train_gb(4.28, 1, 2048, -1, True, 152)
+
+
 def test_invalid_config_is_loud():
     with pytest.raises(ValidationError):
         RunConfig.from_dict({"model": "m", "data": "d", "lora": {"type": "qlora"}})

@@ -233,6 +233,26 @@ class Prepared:
     sample: dict[str, Any] | None = None
 
 
+# The only files prepare() writes, and so the only ones it may delete on a re-run.
+_OUR_FILES = {"train.jsonl", "valid.jsonl"}
+
+
+def _clear_work_dir(work_dir: Path) -> None:
+    """Empty the conversion directory, but never delete a directory we did not write."""
+    if not work_dir.exists():
+        return
+    if not work_dir.is_dir():
+        raise DataError(f"{work_dir} exists and is not a directory")
+    stray = sorted(p.name for p in work_dir.iterdir() if p.name not in _OUR_FILES)
+    if stray:
+        raise DataError(
+            f"Refusing to overwrite {work_dir}: it holds files mlxtuner did not write "
+            f"({', '.join(stray[:4])}{', ...' if len(stray) > 4 else ''}). "
+            "Point train.output at a directory of its own."
+        )
+    shutil.rmtree(work_dir)
+
+
 def prepare(cfg: DataConfig, work_dir: Path) -> Prepared:
     """Load, convert, split and write mlx-lm's train/valid.jsonl into ``work_dir``."""
     train_rows, valid_rows = load_rows(cfg.path)
@@ -269,8 +289,7 @@ def prepare(cfg: DataConfig, work_dir: Path) -> Prepared:
     else:
         valid = []
 
-    if work_dir.exists():
-        shutil.rmtree(work_dir)
+    _clear_work_dir(work_dir)
     work_dir.mkdir(parents=True)
     # mlx-lm treats a present-but-empty valid.jsonl as an error, so only write it when non-empty.
     for name, rows in (("train", train), ("valid", valid)):
